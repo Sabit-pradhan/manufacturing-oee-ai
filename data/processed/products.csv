@@ -1,0 +1,21 @@
+product_id,product_name,product_family,standard_cycle_time_sec
+P001,Product 01,B,0.84
+P002,Product 02,C,1.33
+P003,Product 03,D,0.6
+P004,Product 04,A,1.74
+P005,Product 05,B,1.45
+P006,Product 06,C,1.64
+P007,Product 07,D,1.03
+P008,Product 08,A,1.96
+P009,Product 09,B,1.84
+P010,Product 10,C,1.67
+P011,Product 11,D,0.79
+P012,Product 12,A,1.2
+P013,Product 13,B,0.57
+P014,Product 14,C,0.73
+P015,Product 15,D,1.52
+P016,Product 16,A,1.62
+P017,Product 17,B,1.95
+P018,Product 18,C,0.99
+P019,Product 19,D,1.06
+P020,Product 20,A,1.2

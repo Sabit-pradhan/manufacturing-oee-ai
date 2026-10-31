@@ -1,0 +1,10 @@
+dataset,total_records,total_columns,schema_status,missing_values_total,expected_missing_values,unexpected_missing_values,duplicate_primary_ids,invalid_machine_references,invalid_product_references,quantity_violations,missing_required_severity,overall_status
+plants,1,6,PASSED,0,0,0,0,0,0,0,0,PASSED
+lines,5,3,PASSED,0,0,0,0,0,0,0,0,PASSED
+machines,30,7,PASSED,0,0,0,0,0,0,0,0,PASSED
+products,20,4,PASSED,0,0,0,0,0,0,0,0,PASSED
+shifts,270,5,PASSED,0,0,0,0,0,0,0,0,PASSED
+production_orders,154168,8,PASSED,0,0,0,0,0,0,0,0,PASSED
+production_counts,491156,17,PASSED,0,0,0,0,0,0,0,0,PASSED
+quality_inspections,491156,12,PASSED,0,0,0,0,0,0,0,0,PASSED
+state_events,100000,12,PASSED,79017,79017,0,0,0,0,0,0,PASSED

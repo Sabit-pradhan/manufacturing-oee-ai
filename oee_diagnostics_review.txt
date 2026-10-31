@@ -1,0 +1,543 @@
+
+========== backend\diagnose_count_semantics.py ==========
+
+
+from sqlalchemy import text
+from app.database.connection import engine
+
+with engine.connect() as connection:
+
+    print("\n1. RECORD TYPE DISTRIBUTION")
+
+    rows = connection.execute(text("""
+        SELECT
+            record_type,
+            COUNT(*) AS records,
+            SUM(total_count) AS total_count,
+            SUM(good_count) AS good_count,
+            SUM(count_adjustment) AS adjustments
+        FROM production_counts
+        GROUP BY record_type
+        ORDER BY record_type
+    """)).mappings().all()
+
+    for row in rows:
+        print(dict(row))
+
+    print("\n2. CORRECTION RECORD SAMPLES")
+
+    rows = connection.execute(text("""
+        SELECT
+            record_id,
+            record_timestamp,
+            machine_id,
+            total_count,
+            good_count,
+            reject_count,
+            count_adjustment,
+            source_record_id,
+            production_count_id
+        FROM production_counts
+        WHERE record_type = 'COUNT_CORRECTION'
+        LIMIT 10
+    """)).mappings().all()
+
+    for row in rows:
+        print(dict(row))
+
+    print("\n3. COUNT ADJUSTMENT DISTRIBUTION")
+
+    rows = connection.execute(text("""
+        SELECT
+            COUNT(*) AS records,
+            COUNT(*) FILTER (
+                WHERE count_adjustment <> 0
+            ) AS nonzero_adjustments,
+            MIN(count_adjustment) AS minimum_adjustment,
+            MAX(count_adjustment) AS maximum_adjustment
+        FROM production_counts
+    """)).mappings().all()
+
+    for row in rows:
+        print(dict(row))
+
+print("\nDiagnostic completed.")
+
+
+========== backend\diagnose_oee.py ==========
+
+
+from sqlalchemy import text
+from app.database.connection import engine
+
+machine_id = "M001"
+shift_id = "20260101_A"
+
+with engine.connect() as connection:
+
+    print("\n1. PRODUCTION BY PRODUCT")
+
+    rows = connection.execute(
+        text("""
+            SELECT
+                pc.product_id,
+                p.standard_cycle_time_sec,
+                COUNT(*) AS records,
+                SUM(pc.total_count) AS total_count,
+                SUM(pc.good_count) AS good_count
+            FROM production_counts pc
+            JOIN products p ON p.product_id = pc.product_id
+            WHERE pc.machine_id = :machine_id
+              AND pc.shift_id = :shift_id
+              AND pc.record_type = 'PRODUCTION_COUNT'
+            GROUP BY pc.product_id, p.standard_cycle_time_sec
+            ORDER BY pc.product_id
+        """),
+        {"machine_id": machine_id, "shift_id": shift_id}
+    ).mappings().all()
+
+    for row in rows:
+        print(dict(row))
+
+    print("\n2. DOWNTIME EVENTS")
+
+    events = connection.execute(
+        text("""
+            SELECT event_type, COUNT(*) AS event_count,
+                   SUM(duration_seconds) AS total_seconds
+            FROM state_events
+            WHERE machine_id = :machine_id
+              AND event_timestamp >= (
+                  SELECT start_time FROM shifts WHERE shift_id = :shift_id
+              )
+              AND event_timestamp < (
+                  SELECT end_time FROM shifts WHERE shift_id = :shift_id
+              )
+            GROUP BY event_type
+            ORDER BY event_type
+        """),
+        {"machine_id": machine_id, "shift_id": shift_id}
+    ).mappings().all()
+
+    for event in events:
+        print(dict(event))
+
+    print("\n3. SHIFT TIME")
+
+    shift = connection.execute(
+        text("""
+            SELECT start_time, end_time
+            FROM shifts
+            WHERE shift_id = :shift_id
+        """),
+        {"shift_id": shift_id}
+    ).mappings().first()
+
+    print(dict(shift) if shift else "Shift not found")
+
+
+========== backend\test_oee_service.py ==========
+
+
+from sqlalchemy import text
+
+from app.database.connection import engine
+from app.services.oee_service import calculate_machine_oee
+
+
+# Fetch a real machine and shift combination
+with engine.connect() as connection:
+    record = connection.execute(
+        text("""
+            SELECT DISTINCT machine_id, shift_id
+            FROM production_counts
+            WHERE record_type = 'PRODUCTION_COUNT'
+            ORDER BY machine_id, shift_id
+            LIMIT 1
+        """)
+    ).mappings().first()
+
+if not record:
+    raise ValueError("No production records found in database")
+
+machine_id = record["machine_id"]
+shift_id = record["shift_id"]
+
+print("Testing database-connected OEE calculation")
+print("-" * 45)
+print("Machine:", machine_id)
+print("Shift:", shift_id)
+
+result = calculate_machine_oee(machine_id, shift_id)
+
+print("\nOEE RESULT")
+print("-" * 45)
+
+for metric, value in result.items():
+    print(f"{metric}: {value}")
+
+
+========== backend\test_oee.py ==========
+
+
+from app.oee_engine.oee_calculator import calculate_oee
+
+result = calculate_oee(
+    planned_production_time_sec=28800,
+    downtime_sec=3600,
+    ideal_cycle_time_sec=5,
+    total_count=4500,
+    good_count=4400
+)
+
+print("\nOEE CALCULATION RESULT")
+print("-" * 35)
+
+for metric, value in result.items():
+    print(f"{metric}: {value}")
+
+
+========== backend\test_correction_linkage.py ==========
+
+
+import pandas as pd
+
+production = pd.read_csv(
+    r"..\data\processed\production_counts.csv"
+)
+
+corrections = pd.read_csv(
+    r"..\data\processed\count_corrections.csv"
+)
+
+production["record_timestamp"] = pd.to_datetime(
+    production["record_timestamp"]
+)
+
+corrections["record_timestamp"] = pd.to_datetime(
+    corrections["record_timestamp"]
+)
+
+production = production.rename(
+    columns={"record_timestamp": "production_timestamp"}
+)
+
+corrections = corrections.rename(
+    columns={"record_timestamp": "correction_timestamp"}
+)
+
+keys = ["machine_id", "line_id", "product_id"]
+
+production = production.sort_values("production_timestamp")
+corrections = corrections.sort_values("correction_timestamp")
+
+before = pd.merge_asof(
+    corrections,
+    production,
+    left_on="correction_timestamp",
+    right_on="production_timestamp",
+    by=keys,
+    direction="backward",
+    suffixes=("_correction", "_production")
+)
+
+after = pd.merge_asof(
+    corrections,
+    production,
+    left_on="correction_timestamp",
+    right_on="production_timestamp",
+    by=keys,
+    direction="forward",
+    suffixes=("_correction", "_production")
+)
+
+before["gap_minutes"] = (
+    before["correction_timestamp"]
+    - before["production_timestamp"]
+).dt.total_seconds() / 60
+
+after["gap_minutes"] = (
+    after["production_timestamp"]
+    - after["correction_timestamp"]
+).dt.total_seconds() / 60
+
+print("\nCORRECTION MATCH STATISTICS")
+print("=" * 65)
+
+total = len(corrections)
+
+for minutes in [1, 5, 15, 30, 60]:
+
+    before_match = (
+        before["gap_minutes"].le(minutes)
+        & before["production_timestamp"].notna()
+    )
+
+    after_match = (
+        after["gap_minutes"].le(minutes)
+        & after["production_timestamp"].notna()
+    )
+
+    either_match = before_match | after_match
+    both_match = before_match & after_match
+
+    print(f"\nWithin {minutes} minutes:")
+    print(
+        f"Before: {before_match.sum()} "
+        f"({before_match.mean() * 100:.2f}%)"
+    )
+    print(
+        f"After: {after_match.sum()} "
+        f"({after_match.mean() * 100:.2f}%)"
+    )
+    print(
+        f"Either direction: {either_match.sum()} "
+        f"({either_match.mean() * 100:.2f}%)"
+    )
+    print(
+        f"Both directions: {both_match.sum()} "
+        f"({both_match.mean() * 100:.2f}%)"
+    )
+
+print("\nUNMATCHED CORRECTIONS")
+print(
+    "No production candidate within 60 minutes:",
+    (
+        before["gap_minutes"].gt(60)
+        & after["gap_minutes"].gt(60)
+    ).sum()
+)
+
+print("\nAnalysis completed.")
+
+
+========== backend\app\data_generation\data_loader.py ==========
+
+
+from pathlib import Path
+import pandas as pd
+
+
+# Project root directory
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Directory containing processed CSV files
+PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
+
+
+# CSV files required for the initial validation pipeline
+REQUIRED_DATASETS = {
+    "plants": "plants.csv",
+    "lines": "lines.csv",
+    "machines": "machines.csv",
+    "products": "products.csv",
+    "shifts": "shifts.csv",
+    "production_orders": "production_orders.csv",
+    "production_counts": "production_counts.csv",
+    "quality_inspections": "quality_inspections.csv",
+    "state_events": "state_events.csv",
+}
+
+
+def load_csv(file_name: str) -> pd.DataFrame:
+    """
+    Load a CSV file and return it as a Pandas DataFrame.
+    """
+
+    file_path = PROCESSED_DATA_DIR / file_name
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Dataset not found: {file_path}"
+        )
+
+    return pd.read_csv(file_path)
+
+
+def load_all_datasets() -> dict[str, pd.DataFrame]:
+    """
+    Load all required manufacturing datasets.
+    """
+
+    datasets = {}
+
+    for dataset_name, file_name in REQUIRED_DATASETS.items():
+
+        print(f"Loading {dataset_name}...")
+
+        datasets[dataset_name] = load_csv(file_name)
+
+        print(
+            f"Loaded {dataset_name}: "
+            f"{len(datasets[dataset_name])} records"
+        )
+
+    return datasets
+
+
+if __name__ == "__main__":
+
+    data = load_all_datasets()
+
+    print("\nDataset loading completed successfully.")
+
+    print("\nDataset summary:")
+
+    for name, dataframe in data.items():
+
+        print(
+            f"{name}: "
+            f"{dataframe.shape[0]} rows, "
+            f"{dataframe.shape[1]} columns"
+        )
+
+
+========== backend\app\data_generation\quality_validator.py ==========
+
+
+from app.data_generation.data_loader import load_all_datasets
+
+
+def check_missing_values(datasets):
+    """Count missing values in every dataset."""
+
+    results = {}
+
+    for name, df in datasets.items():
+        results[name] = int(df.isnull().sum().sum())
+
+    return results
+
+
+def check_duplicate_ids(datasets):
+    """Check duplicate primary identifiers in master datasets."""
+
+    id_columns = {
+        "plants": "plant_id",
+        "lines": "line_id",
+        "machines": "machine_id",
+        "products": "product_id",
+    }
+
+    results = {}
+
+    for dataset_name, column in id_columns.items():
+        df = datasets[dataset_name]
+
+        results[dataset_name] = int(
+            df[column].duplicated().sum()
+        )
+
+    return results
+
+
+def check_invalid_references(datasets):
+    """Check machine and product references."""
+
+    valid_machine_ids = set(
+        datasets["machines"]["machine_id"].dropna()
+    )
+
+    valid_product_ids = set(
+        datasets["products"]["product_id"].dropna()
+    )
+
+    results = {}
+
+    for dataset_name in [
+        "production_orders",
+        "production_counts",
+        "quality_inspections",
+        "state_events",
+    ]:
+        df = datasets[dataset_name]
+
+        invalid_machines = (
+            ~df["machine_id"].isin(valid_machine_ids)
+        ).sum()
+
+        invalid_products = (
+            ~df["product_id"].isin(valid_product_ids)
+        ).sum() if "product_id" in df.columns else 0
+
+        results[dataset_name] = {
+            "invalid_machine_references": int(invalid_machines),
+            "invalid_product_references": int(invalid_products),
+        }
+
+    return results
+
+
+def check_invalid_quantities(datasets):
+    """Check negative quantities and impossible count relationships."""
+
+    df = datasets["production_counts"]
+
+    results = {
+        "negative_total_count": int((df["total_count"] < 0).sum()),
+        "negative_good_count": int((df["good_count"] < 0).sum()),
+        "negative_reject_count": int((df["reject_count"] < 0).sum()),
+        "good_plus_reject_exceeds_total": int(
+            (
+                df["good_count"] + df["reject_count"]
+                > df["total_count"]
+            ).sum()
+        ),
+    }
+
+    return results
+
+
+def check_event_severity(datasets):
+    """
+    Severity is required for FAULT and MICRO_STOP events.
+    It is optional for other event types in this source dataset.
+    """
+
+    df = datasets["state_events"]
+
+    required_events = ["FAULT", "MICRO_STOP"]
+
+    required_records = df[
+        df["event_type"].isin(required_events)
+    ]
+
+    missing_required_severity = int(
+        required_records["severity"].isna().sum()
+    )
+
+    optional_records = df[
+        ~df["event_type"].isin(required_events)
+    ]
+
+    expected_missing_severity = int(
+        optional_records["severity"].isna().sum()
+    )
+
+    return {
+        "missing_severity_in_required_events":
+            missing_required_severity,
+        "expected_missing_severity":
+            expected_missing_severity,
+    }
+
+
+if __name__ == "__main__":
+
+    datasets = load_all_datasets()
+
+    print("\nMISSING VALUE CHECK")
+    print(check_missing_values(datasets))
+
+    print("\nDUPLICATE ID CHECK")
+    print(check_duplicate_ids(datasets))
+
+    print("\nINVALID REFERENCE CHECK")
+    print(check_invalid_references(datasets))
+
+    print("\nINVALID QUANTITY CHECK")
+    print(check_invalid_quantities(datasets))
+
+    print("\nEVENT SEVERITY CHECK")
+    print(check_event_severity(datasets))
+

@@ -1,0 +1,18 @@
+check_name,passed,observed,expected,severity,notes
+lines_row_count,True,5,5,ERROR,
+machines_row_count,True,30,30,ERROR,
+products_row_count,True,20,20,ERROR,
+shifts_row_count,True,270,270,ERROR,
+state_events_row_count,True,100000,100000,ERROR,
+combined_count_inspection_row_count,True,500000,500000,ERROR,
+unique_source_event_ids,True,100000,100000,ERROR,
+unique_source_count_record_ids,True,500000,500000,ERROR,
+machine_line_fk,True,0,0,ERROR,
+event_machine_fk,True,0,0,ERROR,
+event_product_fk,True,0,0,ERROR,
+count_shift_fk,True,0,0,ERROR,
+correction_rows_preserved,True,8844,8844,ERROR,
+production_order_mapping_complete,True,0,0,ERROR,
+quality_rows_match_production_rows,True,491156,491156,ERROR,
+ground_truth_has_rows,True,198426,>0,INFO,
+oee_is_provisional,True,PROVISIONAL_EVENT_SAMPLE_ESTIMATE,not production-grade OEE,WARNING,Requires interval reconstruction and count/correction semantics.

@@ -1,0 +1,2 @@
+plant_id,plant_name,location,country,status,source
+PLANT_01,Manufacturing Plant 01,Synthetic location - not supplied in source data,Not specified,ACTIVE,Derived from distinct lines.csv plant values; descriptive fields are placeholders

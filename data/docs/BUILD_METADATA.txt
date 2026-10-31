@@ -1,0 +1,8 @@
+@'
+seed=20261022
+source_data_type=synthetic
+source_state_events=100000
+source_count_inspection_records=500000
+derived_data_is_deterministic=true
+source_files_preserved=true
+'@ | Set-Content .\data\docs\BUILD_METADATA.txt -Encoding UTF8

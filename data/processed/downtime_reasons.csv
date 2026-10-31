@@ -1,0 +1,7 @@
+reason_code,event_type,category,description,planned_status,source
+PLANNED_BREAK,PLANNED_BREAK,DOWNTIME_PLANNED,Planned break,PLANNED,Documented mapping of uploaded event_type values
+MICRO_STOP,MICRO_STOP,DOWNTIME_UNPLANNED,Micro-stop,UNSPECIFIED_OR_UNPLANNED,Documented mapping of uploaded event_type values
+CHANGEOVER,CHANGEOVER,DOWNTIME_PLANNED,Changeover,PLANNED,Documented mapping of uploaded event_type values
+MAINTENANCE,MAINTENANCE,DOWNTIME_UNPLANNED,Maintenance,UNSPECIFIED_OR_UNPLANNED,Documented mapping of uploaded event_type values
+FAULT,FAULT,DOWNTIME_UNPLANNED,Equipment fault,UNSPECIFIED_OR_UNPLANNED,Documented mapping of uploaded event_type values
+RUN,RUN,PRODUCTION,Running,NOT_DOWNTIME,Documented mapping of uploaded event_type values

@@ -1,0 +1,633 @@
+
+========== backend\app\oee_engine\downtime_calculator.py ==========
+
+
+def calculate_downtime(events: list[dict]) -> float:
+    """
+    Calculate total downtime in seconds.
+
+    Only FAULT, MICRO_STOP and MAINTENANCE
+    events are treated as downtime here.
+
+    PLANNED_BREAK and CHANGEOVER are excluded
+    from this initial calculation.
+    """
+
+    downtime_types = {
+        "FAULT",
+        "MICRO_STOP",
+        "MAINTENANCE"
+    }
+
+    total_downtime = 0.0
+
+    for event in events:
+        event_type = event.get("event_type", "").upper()
+
+        if event_type in downtime_types:
+            duration = event.get("duration_seconds") or 0
+            total_downtime += max(float(duration), 0)
+
+    return total_downtime
+
+
+========== backend\app\oee_engine\oee_calculator.py ==========
+
+
+from app.oee_engine.quality_calculator import calculate_quality
+from app.oee_engine.performance_calculator import calculate_performance
+
+
+def calculate_availability(
+    planned_production_time_sec: float,
+    downtime_sec: float
+) -> float:
+
+    if planned_production_time_sec <= 0:
+        return 0.0
+
+    if downtime_sec < 0 or downtime_sec > planned_production_time_sec:
+        raise ValueError("Invalid downtime duration")
+
+    operating_time = planned_production_time_sec - downtime_sec
+
+    return operating_time / planned_production_time_sec
+
+
+def calculate_oee(
+    planned_production_time_sec: float,
+    downtime_sec: float,
+    ideal_cycle_time_sec: float,
+    total_count: int,
+    good_count: int
+) -> dict:
+
+    availability = calculate_availability(
+        planned_production_time_sec,
+        downtime_sec
+    )
+
+    operating_time = planned_production_time_sec - downtime_sec
+
+    performance = calculate_performance(
+        ideal_cycle_time_sec,
+        total_count,
+        operating_time
+    )
+
+    quality = calculate_quality(
+        good_count,
+        total_count
+    )
+
+    oee = availability * performance * quality
+
+    return {
+        "availability": round(availability * 100, 2),
+        "performance": round(performance * 100, 2),
+        "quality": round(quality * 100, 2),
+        "oee": round(oee * 100, 2),
+        "operating_time_sec": operating_time,
+        "downtime_sec": downtime_sec
+    }
+
+
+========== backend\app\oee_engine\performance_calculator.py ==========
+
+
+def calculate_performance(
+    ideal_cycle_time_sec: float,
+    total_count: int,
+    operating_time_sec: float
+) -> float:
+    """
+    Performance =
+    (Ideal Cycle Time x Total Production) / Operating Time
+
+    Returns a decimal ratio.
+    """
+
+    if operating_time_sec <= 0:
+        return 0.0
+
+    if ideal_cycle_time_sec <= 0 or total_count < 0:
+        raise ValueError("Invalid performance calculation inputs")
+
+    ideal_production_time = ideal_cycle_time_sec * total_count
+
+    return ideal_production_time / operating_time_sec
+
+
+========== backend\app\oee_engine\quality_calculator.py ==========
+
+
+def calculate_quality(good_count: int, total_count: int) -> float:
+    """
+    Quality = Good Units / Total Units
+
+    Returns a decimal between 0 and 1.
+    """
+
+    if total_count <= 0:
+        return 0.0
+
+    if good_count < 0 or good_count > total_count:
+        raise ValueError("Invalid production counts")
+
+    return good_count / total_count
+
+
+========== backend\app\services\oee_service.py ==========
+
+
+from sqlalchemy import text
+
+from app.database.connection import engine
+from app.oee_engine.oee_calculator import calculate_oee
+
+
+def calculate_machine_oee(machine_id: str, shift_id: str):
+    """
+    Calculate provisional machine-level OEE for a shift.
+
+    Supports multiple products using product-specific
+    ideal cycle times.
+
+    Assumption: PRODUCTION_COUNT rows are additive records.
+    COUNT_CORRECTION rows are excluded pending validation
+    of their correction semantics.
+    """
+
+    with engine.connect() as connection:
+
+        # 1. Retrieve shift duration
+        shift = connection.execute(
+            text("""
+                SELECT start_time, end_time
+                FROM shifts
+                WHERE shift_id = :shift_id
+            """),
+            {"shift_id": shift_id}
+        ).mappings().first()
+
+        if not shift:
+            raise ValueError(f"Shift not found: {shift_id}")
+
+        shift_duration = (
+            shift["end_time"] - shift["start_time"]
+        ).total_seconds()
+
+        # 2. Aggregate production by product
+        products = connection.execute(
+            text("""
+                SELECT
+                    pc.product_id,
+                    p.standard_cycle_time_sec,
+                    SUM(pc.total_count) AS total_count,
+                    SUM(pc.good_count) AS good_count
+                FROM production_counts pc
+                JOIN products p
+                    ON p.product_id = pc.product_id
+                WHERE pc.machine_id = :machine_id
+                  AND pc.shift_id = :shift_id
+                  AND pc.record_type = 'PRODUCTION_COUNT'
+                GROUP BY
+                    pc.product_id,
+                    p.standard_cycle_time_sec
+            """),
+            {
+                "machine_id": machine_id,
+                "shift_id": shift_id
+            }
+        ).mappings().all()
+
+        if not products:
+            raise ValueError("No production records found")
+
+        # Calculate total production and ideal production time
+        total_count = 0
+        good_count = 0
+        ideal_production_time = 0.0
+
+        for product in products:
+            product_total = int(product["total_count"] or 0)
+            product_good = int(product["good_count"] or 0)
+            cycle_time = float(product["standard_cycle_time_sec"])
+
+            total_count += product_total
+            good_count += product_good
+
+            ideal_production_time += (
+                cycle_time * product_total
+            )
+
+        # 3. Retrieve event durations for this shift
+        events = connection.execute(
+            text("""
+                SELECT
+                    event_type,
+                    COALESCE(duration_seconds, 0) AS duration_seconds
+                FROM state_events
+                WHERE machine_id = :machine_id
+                  AND event_timestamp >= :start_time
+                  AND event_timestamp < :end_time
+            """),
+            {
+                "machine_id": machine_id,
+                "start_time": shift["start_time"],
+                "end_time": shift["end_time"]
+            }
+        ).mappings().all()
+
+    # 4. Separate planned breaks and downtime
+    planned_break_sec = 0.0
+    downtime_sec = 0.0
+
+    for event in events:
+        event_type = event["event_type"].upper()
+        duration = max(float(event["duration_seconds"]), 0)
+
+        if event_type == "PLANNED_BREAK":
+            planned_break_sec += duration
+
+        elif event_type in {
+            "FAULT",
+            "MICRO_STOP",
+            "MAINTENANCE"
+        }:
+            downtime_sec += duration
+
+    # 5. Calculate planned production time
+    planned_production_time = (
+        shift_duration - planned_break_sec
+    )
+
+    if planned_production_time <= 0:
+        raise ValueError("Invalid planned production time")
+
+    if planned_break_sec > shift_duration:
+        raise ValueError("Planned breaks exceed shift duration")
+
+    # 6. Calculate OEE
+    result = calculate_oee(
+        planned_production_time_sec=planned_production_time,
+        downtime_sec=downtime_sec,
+        ideal_cycle_time_sec=(
+            ideal_production_time / total_count
+            if total_count > 0 else 0
+        ),
+        total_count=total_count,
+        good_count=good_count
+    )
+
+    return {
+        "machine_id": machine_id,
+        "shift_id": shift_id,
+        "product_count": len(products),
+        "total_count": total_count,
+        "good_count": good_count,
+        "ideal_production_time_sec": round(
+            ideal_production_time, 2
+        ),
+        "shift_duration_sec": shift_duration,
+        "planned_break_sec": planned_break_sec,
+        "planned_production_time_sec": planned_production_time,
+        **result
+    }
+
+
+========== backend\app\models\state_event.py ==========
+
+
+from datetime import datetime
+
+from sqlalchemy import (
+    String, Integer, Float, DateTime, ForeignKey
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base
+
+
+class StateEvent(Base):
+    """Stores machine operational state events."""
+
+    __tablename__ = "state_events"
+
+    event_id: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )
+
+    event_timestamp: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
+    )
+
+    machine_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("machines.machine_id"),
+        nullable=False
+    )
+
+    line_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("production_lines.line_id"),
+        nullable=False
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )
+
+    product_id: Mapped[str | None] = mapped_column(
+        String(50),
+        ForeignKey("products.product_id"),
+        nullable=True
+    )
+
+    duration_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+
+    recorded_by: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+
+    severity: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+
+    source_event_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+
+    canonical_event_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+
+    duration_minutes: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+
+
+========== backend\app\models\production_count.py ==========
+
+
+from datetime import datetime
+
+from sqlalchemy import (
+    String, Integer, DateTime, ForeignKey
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base
+
+
+class ProductionCount(Base):
+    """Stores production count and correction records."""
+
+    __tablename__ = "production_counts"
+
+    production_count_id: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )
+
+    record_id: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )
+
+    record_timestamp: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
+    )
+
+    machine_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("machines.machine_id"),
+        nullable=False
+    )
+
+    line_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("production_lines.line_id"),
+        nullable=False
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("products.product_id"),
+        nullable=False
+    )
+
+    total_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    good_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    reject_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    inspected_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    inspection_fail_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    record_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )
+
+    count_adjustment: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    source_system: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+
+    shift_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("shifts.shift_id"),
+        nullable=False
+    )
+
+    production_order_id: Mapped[str | None] = mapped_column(
+        String(50),
+        ForeignKey("production_orders.production_order_id"),
+        nullable=True
+    )
+
+    source_record_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+
+
+========== backend\app\models\quality_inspection.py ==========
+
+
+from datetime import datetime
+
+from sqlalchemy import (
+    String, Integer, DateTime, ForeignKey
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base
+
+
+class QualityInspection(Base):
+    """Stores manufacturing quality inspection records."""
+
+    __tablename__ = "quality_inspections"
+
+    quality_inspection_id: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )
+
+    record_timestamp: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
+    )
+
+    machine_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("machines.machine_id"),
+        nullable=False
+    )
+
+    line_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("production_lines.line_id"),
+        nullable=False
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("products.product_id"),
+        nullable=False
+    )
+
+    shift_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("shifts.shift_id"),
+        nullable=False
+    )
+
+    inspected_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    good_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    reject_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    inspection_fail_count: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    source_system: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+
+    source_record_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+
+
+========== backend\app\models\shift.py ==========
+
+
+from datetime import date, datetime
+
+from sqlalchemy import String, Date, DateTime
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base
+
+
+class Shift(Base):
+    """Represents a scheduled manufacturing shift."""
+
+    __tablename__ = "shifts"
+
+    shift_id: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )
+
+    shift_date: Mapped[date] = mapped_column(
+        Date, nullable=False
+    )
+
+    shift_code: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )
+
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
+    )
+
+    end_time: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
+    )
+
+
+========== backend\app\models\production_order.py ==========
+
+
+from sqlalchemy import String, Integer, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base
+
+
+class ProductionOrder(Base):
+
+    __tablename__ = "production_orders"
+
+    production_order_id: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )
+
+    machine_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("machines.machine_id"),
+        nullable=False
+    )
+
+    line_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("production_lines.line_id"),
+        nullable=False
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("products.product_id"),
+        nullable=False
+    )
+
+    shift_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("shifts.shift_id"),
+        nullable=False
+    )
+
+    order_status: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+
+    planned_quantity: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    source: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+
